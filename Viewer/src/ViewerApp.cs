@@ -143,6 +143,74 @@ namespace XrealDesktop.PcViewer
                 }
                 imu.DeviceName = "replay"; imu.SaveBias(); return 0;
             }
+            int wt = Array.IndexOf(args, "--wiggle-test");
+            if (wt >= 0 && wt + 1 < args.Length)
+            {
+                // Replays a recording and measures what moves the picture while the head turns:
+                //  1) motion injected by the accelerometer correction (shipped tracker vs. one with Kp = Ki = 0)
+                //  2) picture error left by prediction, with the head pose taken at the frame start vs. just before the refresh
+                AttachConsole(-1);
+                var lines = System.IO.File.ReadAllLines(args[wt + 1]);
+                var hdr = new List<string>(lines[0].Split(','));
+                int it = hdr.IndexOf("t_s"), igx = hdr.IndexOf("gx_dps"), iax = hdr.IndexOf("ax_g"), itemp = hdr.IndexOf("tempC");
+                var ci = CultureInfo.InvariantCulture;
+                const double PxPerDeg = 1080 / 24.8, R2D = 180 / Math.PI;
+                int[] ahead = { 0, 10, 20, 30, 40 };
+                var imu = new XrealImu { DeviceName = "wiggle" };
+                if (wt + 2 < args.Length) imu.AccelTrustMaxDps = double.Parse(args[wt + 2], ci);   // try another gate (1e9 = no gate)
+                var gyroOnly = new XrealImu { DeviceName = "wiggle", Kp = 0, Ki = 0 };
+                var T = new List<double>(); var rate = new List<double>(); var rel = new List<Quat>(); var pred = new List<Quat[]>();
+                double prevT = -1;
+                for (int li = 1; li < lines.Length; li++)
+                {
+                    var c = lines[li].Split(',');
+                    double t = double.Parse(c[it], ci), dt = prevT < 0 ? 0.001 : Math.Max(0.0001, Math.Min(0.05, t - prevT)); prevT = t;
+                    double gx = double.Parse(c[igx], ci), gy = double.Parse(c[igx + 1], ci), gz = double.Parse(c[igx + 2], ci);
+                    double ax = double.Parse(c[iax], ci), ay = double.Parse(c[iax + 1], ci), az = double.Parse(c[iax + 2], ci), temp = itemp >= 0 ? double.Parse(c[itemp], ci) : 25;
+                    imu.Feed(gx, gy, gz, ax, ay, az, dt, temp); gyroOnly.Feed(gx, gy, gz, ax, ay, az, dt, temp);
+                    if (!imu.Calibrated || !gyroOnly.Calibrated) continue;
+                    T.Add(t); rate.Add(Math.Sqrt(gx * gx + gy * gy + gz * gz));
+                    rel.Add(imu.GetPose(0) * gyroOnly.GetPose(0).Conj());   // world frame: unchanged by the head motion both trackers share
+                    var p = new Quat[ahead.Length]; for (int k = 0; k < ahead.Length; k++) p[k] = imu.GetPose(ahead[k] / 1000.0); pred.Add(p);
+                }
+                int N = T.Count; if (N < 3000) { Console.WriteLine("recording too short / never calibrated"); return 1; }
+                // index of the sample 'ms' after sample i (recordings are ~1 kHz but not exactly)
+                Func<int, double, int> after = (i, ms) => { int j = i + (int)ms; while (j < N && T[j] - T[i] < ms / 1000) j++; while (j > i && j < N && T[j - 1] - T[i] >= ms / 1000) j--; return j; };
+                // skip the first 2 s after calibration (fast levelling is still settling)
+                int i0 = after(0, 2000);
+                // 1) accelerometer-injected motion over 100 ms windows, split by head speed
+                double sT = 0, nT = 0, pT = 0, sS = 0, nS = 0, pS = 0, sM = 0, nM = 0, turnSec = 0;
+                for (int i = i0; ; )
+                {
+                    int j = after(i, 100); if (j >= N) break;
+                    double mean = 0; for (int k = i; k < j; k++) mean += rate[k]; mean /= (j - i);
+                    double dps = Stabilizer.Angle(rel[i], rel[j]) * R2D / (T[j] - T[i]);
+                    if (mean > 20) { sT += dps * dps; nT++; pT = Math.Max(pT, dps); turnSec += T[j] - T[i]; }
+                    else if (mean < 3) { sS += dps * dps; nS++; pS = Math.Max(pS, dps); }
+                    else { sM += dps * dps; nM++; }
+                    i = j;
+                }
+                Console.WriteLine(string.Format(ci, "{0}: {1:F0} s tracked, {2:F0} s turning (>20 deg/s)", System.IO.Path.GetFileName(args[wt + 1]), T[N - 1] - T[0], turnSec));
+                Console.WriteLine(string.Format(ci, "  accelerometer moves the picture: turning {0:F2} deg/s RMS (peak {1:F2}) = {2:F0} px/s | slow (3-20 deg/s) {5:F2} deg/s RMS | still {3:F3} deg/s RMS (peak {4:F2})",
+                    Math.Sqrt(sT / Math.Max(1, nT)), pT, Math.Sqrt(sT / Math.Max(1, nT)) * PxPerDeg, Math.Sqrt(sS / Math.Max(1, nS)), pS, Math.Sqrt(sM / Math.Max(1, nM))));
+                // 2) picture error at 60 Hz frames when the picture is seen T ms after the frame started: pose taken at
+                //    the frame start and predicted T ms ahead (early), or taken Late ms later and predicted the rest (late)
+                const int Late = 10;   // what the render loop gains by waiting for the refresh before measuring
+                foreach (int target in new[] { 20, 30, 40 })
+                    foreach (int wait in new[] { 0, Late })
+                    {
+                        int kp = Array.IndexOf(ahead, target - wait);
+                        double s = 0, n = 0, peak = 0;
+                        for (int i = i0; ; )
+                        {
+                            int j = after(i, wait), k = after(i, target); if (k >= N) break;
+                            if (rate[i] > 20) { double a = Stabilizer.Angle(pred[j][kp], pred[k][0]) * R2D * PxPerDeg; s += a * a; n++; peak = Math.Max(peak, a); }
+                            i = after(i, 1000.0 / 60);
+                        }
+                        Console.WriteLine(string.Format(ci, "  seen {0} ms after frame start, pose taken {1,2} ms in: off by {2,5:F1} px RMS (peak {3,5:F1}) while turning", target, wait, Math.Sqrt(s / Math.Max(1, n)), peak));
+                    }
+                return 0;
+            }
             if (Array.IndexOf(args, "--virtual-test") >= 0)
             {
                 // Diagnostics: list virtual monitors, attach the first at 1920x1080, then detach it again.
@@ -421,13 +489,13 @@ namespace XrealDesktop.PcViewer
             string err;
             int mode = XrealMcu.ReadDisplayMode(out err);
             Log.W("Glasses display mode: " + (mode >= 0 ? mode.ToString() : "unknown (" + err + ")"));
-            byte want = settings.Sbs3D ? XrealMcu.MODE_SBS_3840_60 : XrealMcu.MODE_2D_1080_60;
+            byte want = settings.Sbs3D ? XrealMcu.MODE_SBS_3840_60 : XrealMcu.Mode2D(settings.RefreshHz);
             if (mode >= 0 && mode != want)
             {
                 if (XrealMcu.WriteDisplayMode(want, out err))
                 {
                     set3d = want == XrealMcu.MODE_SBS_3840_60;
-                    Log.W("Switched glasses to " + (set3d ? "3D" : "2D"));
+                    Log.W("Switched glasses to " + (set3d ? "3D" : "2D") + " (mode " + want + ")");
                     // The display drops and comes back at the new resolution; wait for Windows to see it again.
                     var sw = Stopwatch.StartNew();
                     Thread.Sleep(1500);
@@ -470,6 +538,8 @@ namespace XrealDesktop.PcViewer
             if (sources.Count == 0) { Fail("No monitors to show besides the glasses.", quiet); return RunResult.Error; }
             if (glasses.Primary) Log.W("WARNING: the glasses are the primary display; taskbar and new windows will open there.");
 
+            if (!settings.Sbs3D) Log.W("Glasses refresh rate: " + VirtualScreens.SetRefresh(glasses.DeviceName, settings.RefreshHz) + " Hz (wanted " + settings.RefreshHz + ")");
+
             // 3) Head tracking + viewer.
             var imu = new XrealImu();
             try
@@ -489,9 +559,10 @@ namespace XrealDesktop.PcViewer
         static void Cleanup(ref bool set3d, ref uint restoreTopology)
         {
             string err;
-            if (set3d)
+            // (also from 90/120 Hz: Windows can't duplicate the PC screen onto the glasses while they are in a faster mode)
+            if (set3d || XrealMcu.ReadDisplayMode(out err) > XrealMcu.MODE_2D_1080_60)
             {
-                Log.W("Switching glasses back to 2D");
+                Log.W("Switching glasses back to 2D 60 Hz");
                 XrealMcu.WriteDisplayMode(XrealMcu.MODE_2D_1080_60, out err);
                 set3d = false;
                 // the glasses' display drops out and comes back in 2D: wait for it, so the restore below can

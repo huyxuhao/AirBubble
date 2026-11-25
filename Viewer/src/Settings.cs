@@ -12,6 +12,7 @@ namespace XrealDesktop.PcViewer
         public volatile float Distance = 1.6f;     // m, screen distance
         public volatile float PanelWidth = 1.0f;   // m, main screen width
         public volatile float PredictMs = 15f;     // head pose prediction
+        public volatile int RefreshHz = 120;       // glasses refresh rate in 2D: 60, 90 or 120 (ini only). Faster = less smear while the head turns
         public volatile float CaptureFps = 30f;    // window capture rate (monitors follow the desktop's own rate)
         public volatile bool Curved = false;       // monitors on a cylinder around you
         public volatile bool Sbs3D = false;        // side-by-side stereo (glasses switched to 3840x1080)
@@ -79,6 +80,7 @@ namespace XrealDesktop.PcViewer
                         case "distance": if (fOk) s.Distance = Clamp(f, 0.5f, 6); break;
                         case "panelWidth": if (fOk) s.PanelWidth = Clamp(f, 0.3f, 4); break;
                         case "predictMs": if (fOk) s.PredictMs = Clamp(f, 0, 50); break;
+                        case "refreshHz": if (fOk) s.RefreshHz = f >= 120 ? 120 : f >= 90 ? 90 : 60; break;
                         case "captureFps": if (fOk) s.CaptureFps = Clamp(f, 5, 60); break;
                         case "ipdMm": if (fOk) s.IpdMm = Clamp(f, 50, 80); break;
                         case "stereoConverge": if (fOk) s.StereoConverge = Clamp(f, 0, 2); break;
@@ -123,9 +125,9 @@ namespace XrealDesktop.PcViewer
                 var helpers = new System.Text.StringBuilder();
                 for (int i = 0; i < HelperVoice.Length; i++) helpers.Append("voice" + Bubble.HelperColors[i] + "=" + (HelperVoice[i] ?? "") + "\r\n");
                 File.WriteAllText(PathFor(), helpers.Insert(0, string.Format(CultureInfo.InvariantCulture,
-                    "fovV={0}\r\ndistance={1}\r\npanelWidth={2}\r\npredictMs={3}\r\ncaptureFps={4}\r\nipdMm={5}\r\ncurved={6}\r\nsbs3d={7}\r\nlookToInteract={8}\r\nmouseSpeed={9}\r\nshowPcScreens={10}\r\nautoDrift={11}\r\nstabilization={12}\r\nstereoConverge={13}\r\nstereoVOffset={14}\r\nstereoEdgeMatch={15}\r\nbubble={16}\r\nbubbleAi={17}\r\nbubbleAppControl={18}\r\nbubbleVoice={19}\r\nbubbleSpatial={20}\r\nbubbleAutonomy={21}\r\nconfineMouse={22}\r\nbubbleFreeFloat={23}\r\n",
+                    "fovV={0}\r\ndistance={1}\r\npanelWidth={2}\r\npredictMs={3}\r\ncaptureFps={4}\r\nipdMm={5}\r\ncurved={6}\r\nsbs3d={7}\r\nlookToInteract={8}\r\nmouseSpeed={9}\r\nshowPcScreens={10}\r\nautoDrift={11}\r\nstabilization={12}\r\nstereoConverge={13}\r\nstereoVOffset={14}\r\nstereoEdgeMatch={15}\r\nbubble={16}\r\nbubbleAi={17}\r\nbubbleAppControl={18}\r\nbubbleVoice={19}\r\nbubbleSpatial={20}\r\nbubbleAutonomy={21}\r\nconfineMouse={22}\r\nbubbleFreeFloat={23}\r\nrefreshHz={24}\r\n",
                     FovV, Distance, PanelWidth, PredictMs, CaptureFps, IpdMm, Curved ? 1 : 0, Sbs3D ? 1 : 0, LookToInteract ? 1 : 0, MouseSpeed, ShowPcScreens ? 1 : 0, AutoDrift ? 1 : 0, Stabilization,
-                    StereoConverge, StereoVOffset, StereoEdgeMatch ? 1 : 0, ShowBubble ? 1 : 0, BubbleAi ? 1 : 0, BubbleAppControl ? 1 : 0, BubbleVoice ?? "", BubbleSpatialAudio ? 1 : 0, BubbleAutonomy, ConfineMouse ? 1 : 0, BubbleFreeFloat ? 1 : 0)).ToString());
+                    StereoConverge, StereoVOffset, StereoEdgeMatch ? 1 : 0, ShowBubble ? 1 : 0, BubbleAi ? 1 : 0, BubbleAppControl ? 1 : 0, BubbleVoice ?? "", BubbleSpatialAudio ? 1 : 0, BubbleAutonomy, ConfineMouse ? 1 : 0, BubbleFreeFloat ? 1 : 0, RefreshHz)).ToString());
             }
             catch { }
         }

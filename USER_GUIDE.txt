@@ -117,6 +117,7 @@ SETTINGS (Ctrl+Alt+S)
   - Stabilization (default Medium) ignores small head wobble - chewing, breathing, walking - so the screens stay
     still; deliberate head turns are followed straight away. Use Strong while walking, Off for the fastest response.
   - If screens seem to slide when you turn your head, adjust "Field of view" until they hold still.
+    (Not needed when the glasses report their own calibration, as the XREAL Air does: the setting is then ignored.)
   - Allow up to 8 screens (quality may be degraded): 4 screens by default, which is the smoothest. With up to 8,
     many open screens (especially video) can make the glasses jittery, mostly on integrated graphics. Changing it
     asks for admin once and restarts AirBubble; the screens blink and reopen as new screens (Ctrl+Alt+N adds more).

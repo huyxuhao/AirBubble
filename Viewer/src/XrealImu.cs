@@ -112,6 +112,7 @@ namespace XrealDesktop.PcViewer
         public double Kp = 0.4;           // accel correction gain (steady state)
         public double KpStartup = 8.0;    // fast leveling right after calibration
         public double Ki = 0.002;         // pitch/roll bias integral
+        public double AccelTrustMaxDps = 20; // head speed at which the accelerometer stops being believed (0 trust)
         const double StillAccelTol = 0.04;// |a| within 1 +- this (g)
 
         // ---------------- gyro bias estimation (the main source of yaw drift) ----------------
@@ -175,6 +176,7 @@ namespace XrealDesktop.PcViewer
             m_Thread.Start();
             Status = "calibrating: hold still";
             LoadBias();
+            LoadDisplayCal();
             return true;
         }
 
@@ -326,6 +328,75 @@ namespace XrealDesktop.PcViewer
             lock (m_Lock) { m_Calibrated = false; m_CalPrev = null; Status = "calibrating: hold still"; }
         }
 
+        // ---------------- factory calibration ----------------
+        // Every pair of glasses stores its own calibration (JSON, ~39 kB). It is fetched in 56-byte segments in between
+        // the IMU packets: 0x14 = length, 0x15 = next segment. (0x16-0x18 allocate/write/free it and are never sent.)
+        /// <summary>Focal lengths of one eye's 1920x1080 display in pixels (0 until read; they differ: pixels are not square).
+        /// These fix how many pixels a degree of head turn is - guess them wrong and every screen slides as you turn.</summary>
+        public double FocalX, FocalY;
+        int m_CalLen, m_CalWait, m_CalTries; MemoryStream m_Cal; bool m_CalDone;
+
+        // The values never change for a pair of glasses, and the glasses do not always answer (seen: their command
+        // channel going silent after two display-mode switches in a row), so the first good read is kept on disk and
+        // they are not asked again.
+        static string DisplayCalFile { get { return Path.Combine(Settings.Dir, "display_cal.ini"); } }
+        void LoadDisplayCal()
+        {
+            try
+            {
+                var p = File.ReadAllText(DisplayCalFile).Trim().Split(','); var c = System.Globalization.CultureInfo.InvariantCulture;
+                if (p.Length != 3 || p[0] != DeviceName) return;
+                FocalX = double.Parse(p[1], c); FocalY = double.Parse(p[2], c); m_CalDone = true;
+                Log.W(string.Format(c, "Glasses calibration (saved): field of view {0:F2} x {1:F2} deg", 2 * Math.Atan(960 / FocalX) / Deg, 2 * Math.Atan(540 / FocalY) / Deg));
+            }
+            catch { }
+        }
+        void SaveDisplayCal()
+        {
+            try { File.WriteAllText(DisplayCalFile, string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0},{1},{2}", DeviceName, FocalX, FocalY)); } catch { }
+        }
+
+        void Send(byte cmd) { var c = BuildCommand(cmd, new byte[0], 65); m_Stream.Write(c, 0, 65); m_Stream.Flush(); }
+
+        void OnReply(byte[] buf)
+        {
+            m_CalWait = 0;
+            int len = (buf[6] | (buf[7] << 8)) - 3;
+            if (buf[8] == 0x14 && len >= 4 && m_Cal == null)
+            {
+                m_CalLen = BitConverter.ToInt32(buf, 9);
+                if (m_CalLen > 0 && m_CalLen < 1 << 20) { m_Cal = new MemoryStream(); Send(0x15); }
+            }
+            else if (buf[8] == 0x15 && m_Cal != null && len > 0 && len <= 56)
+            {
+                m_Cal.Write(buf, 9, len);
+                if (m_Cal.Length < m_CalLen) { Send(0x15); return; }
+                double fx, fy;
+                bool ok = ParseDisplayCal(System.Text.Encoding.UTF8.GetString(m_Cal.ToArray()), out fx, out fy);
+                m_Cal = null; m_CalDone = true;
+                if (ok) { FocalX = fx; FocalY = fy; SaveDisplayCal(); }
+                Log.W(ok ? string.Format(System.Globalization.CultureInfo.InvariantCulture, "Glasses calibration: focal {0:F1} x {1:F1} px -> field of view {2:F2} x {3:F2} deg",
+                               fx, fy, 2 * Math.Atan(960 / fx) / Deg, 2 * Math.Atan(540 / fy) / Deg)
+                         : "Glasses calibration: no usable display data, using the Field of view setting");
+            }
+        }
+
+        /// <summary>Mean focal lengths of the two eye displays ("k_left_display": [fx, 0, cx, 0, fy, cy, 0, 0, 1]).</summary>
+        public static bool ParseDisplayCal(string json, out double fx, out double fy)
+        {
+            fx = fy = 0;
+            var ms = System.Text.RegularExpressions.Regex.Matches(json, "\"k_(?:left|right)_display\"\\s*:\\s*\\[([^\\]]+)\\]");
+            foreach (System.Text.RegularExpressions.Match m in ms)
+            {
+                var v = m.Groups[1].Value.Split(',');
+                double x, y; var c = System.Globalization.CultureInfo.InvariantCulture; var f = System.Globalization.NumberStyles.Float;
+                if (v.Length < 5 || !double.TryParse(v[0], f, c, out x) || !double.TryParse(v[4], f, c, out y)) return false;
+                fx += x / ms.Count; fy += y / ms.Count;
+            }
+            // 900..4500 px = 12..62 deg: anything else is not a field of view these glasses could have
+            return fx > 900 && fx < 4500 && fy > 900 && fy < 4500;
+        }
+
         void ReadLoop()
         {
             var buf = new byte[65];
@@ -335,6 +406,15 @@ namespace XrealDesktop.PcViewer
                 int n;
                 try { n = m_Stream.Read(buf, 0, 65); }
                 catch (Exception e) { if (m_Run) { Status = "glasses disconnected: " + e.Message; Disconnected = true; } return; }
+                if (n == 65 && buf[1] == 0xAA) { try { OnReply(buf); } catch { } continue; }
+                // ask for the calibration once the stream runs (a request sent right behind the start command is lost),
+                // and again if the answers dry up - a few times, then live with the Field of view setting
+                if (!m_CalDone && ++m_CalWait > 1000)
+                {
+                    m_CalWait = 0; m_Cal = null;
+                    if (++m_CalTries > 3) { m_CalDone = true; Log.W("Glasses calibration: no answer, using the Field of view setting"); }
+                    else try { Send(0x14); } catch { }
+                }
                 if (n < 65 || buf[1] != 0x01 || buf[2] != 0x02) continue;
                 const int o = 1;
                 ulong ts = BitConverter.ToUInt64(buf, o + 4);
@@ -389,9 +469,15 @@ namespace XrealDesktop.PcViewer
                     // Estimated up in body frame: R^T * (0,1,0).
                     double vx, vy, vz; m_Q.Conj().Rotate(0, 1, 0, out vx, out vy, out vz);
                     double ex = uy * vz - uz * vy, ey = uz * vx - ux * vz, ez = ux * vy - uy * vx;
-                    double kp = !m_Calibrated || m_SinceCal < 1.0 ? KpStartup : Kp;
+                    bool startup = !m_Calibrated || m_SinceCal < 1.0;
+                    double kp = startup ? KpStartup : Kp;
                     // Weight down the correction when linear acceleration is significant.
                     double trust = Math.Max(0, 1 - Math.Abs(amag - 1) * 5);
+                    // A turning head swings the sensor around the neck, and the accelerometer feels that swing on top
+                    // of gravity without |a| changing much. Levelling towards it tilts the picture while you turn and
+                    // lets it creep back afterwards (--wiggle-test: 0.6-1.9 deg/s), so gravity only counts while the head
+                    // is nearly still; a turn is far too short for the gyro alone to lose the horizon.
+                    if (!startup) trust *= Math.Max(0, 1 - Math.Sqrt(wx * wx + wy * wy + wz * wz) / Deg / AccelTrustMaxDps);
                     if (m_Calibrated) { m_Ix += Ki * ex * dt * trust; m_Iy += Ki * ey * dt * trust; m_Iz += Ki * ez * dt * trust; }
                     wx += (kp * ex + m_Ix) * trust; wy += (kp * ey + m_Iy) * trust; wz += (kp * ez + m_Iz) * trust;
                 }

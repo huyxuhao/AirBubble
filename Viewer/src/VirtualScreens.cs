@@ -204,6 +204,19 @@ namespace XrealDesktop.PcViewer
             return true;
         }
 
+        /// <summary>Sets a monitor's refresh rate (resolution and position stay). Returns the rate it then runs at.</summary>
+        public static int SetRefresh(string deviceName, int hz)
+        {
+            var dm = NewDevMode();
+            if (!EnumDisplaySettings(deviceName, ENUM_CURRENT_SETTINGS, ref dm)) return 0;
+            if (dm.dmDisplayFrequency == hz) return hz;
+            dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY; dm.dmDisplayFrequency = hz;
+            ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero);
+            System.Threading.Thread.Sleep(500);   // a refused rate reads back for a moment before Windows drops it
+            dm = NewDevMode();
+            return EnumDisplaySettings(deviceName, ENUM_CURRENT_SETTINGS, ref dm) ? dm.dmDisplayFrequency : 0;
+        }
+
         /// <summary>Sets an attached monitor's resolution, keeping its position (queued until Apply()).</summary>
         public static bool SetMode(string deviceName, int width, int height)
         {
