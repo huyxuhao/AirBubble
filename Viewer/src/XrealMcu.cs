@@ -15,8 +15,11 @@ namespace XrealDesktop.PcViewer
     /// </summary>
     public static class XrealMcu
     {
-        public const byte MODE_2D_1080_60 = 0x1, MODE_SBS_3840_60 = 0x3;
+        public const byte MODE_2D_1080_60 = 0x1, MODE_SBS_3840_60 = 0x3, MODE_2D_1080_90 = 0xA, MODE_2D_1080_120 = 0xB;   // device_mcu.h
+        /// <summary>The 2D mode for a refresh rate. The glasses only take a 90/120 Hz signal after being put in that mode.</summary>
+        public static byte Mode2D(int hz) { return hz >= 120 ? MODE_2D_1080_120 : hz >= 90 ? MODE_2D_1080_90 : MODE_2D_1080_60; }
         const ushort MSG_R_DISP_MODE = 0x07, MSG_W_DISP_MODE = 0x08;
+        const double ModeGapSec = 15;
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr t);
@@ -97,11 +100,18 @@ namespace XrealDesktop.PcViewer
         /// <summary>Switches the glasses' display mode. Windows sees the display change resolution a moment later.</summary>
         public static bool WriteDisplayMode(byte mode, out string error)
         {
-            if (mode != MODE_2D_1080_60 && mode != MODE_SBS_3840_60) { error = "unsupported mode"; return false; }
+            if (mode != MODE_2D_1080_60 && mode != MODE_SBS_3840_60 && mode != MODE_2D_1080_90 && mode != MODE_2D_1080_120) { error = "unsupported mode"; return false; }
+            // ponytail: fixed pause. A second mode switch 6 s after the first left the glasses deaf to every command
+            // until replugged (seen once: quit, then start right away), so switches are kept ModeGapSec apart, across
+            // runs. Shorten it if a shorter gap proves safe.
+            string stamp = Path.Combine(Settings.Dir, "mode_switch.stamp");
+            try { double age = (DateTime.UtcNow - File.GetLastWriteTimeUtc(stamp)).TotalSeconds; if (age >= 0 && age < ModeGapSec) Thread.Sleep((int)((ModeGapSec - age) * 1000)); } catch { }
             using (var fs = Open(out error))
             {
                 if (fs == null) return false;
-                return Transact(fs, MSG_W_DISP_MODE, new[] { mode }, 3000, out error) != null;
+                bool ok = Transact(fs, MSG_W_DISP_MODE, new[] { mode }, 3000, out error) != null;
+                if (ok) try { File.WriteAllText(stamp, ""); } catch { }
+                return ok;
             }
         }
     }

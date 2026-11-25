@@ -70,7 +70,7 @@ namespace XrealDesktop.PcViewer
 
             AddHeader(t, "Tracking");
             AddSlider(t, "Field of view", 150, 400, (int)(s.FovV * 10), v => string.Format("{0:F1} deg", v / 10.0), v => { s.FovV = v / 10f; });
-            AddNote(t, "If screens slide when you turn your head, adjust this until they hold still.");
+            AddNote(t, "If screens slide when you turn your head, adjust this until they hold still. Not used when the glasses report their own calibration (XREAL Air).");
             AddSlider(t, "Prediction", 0, 40, (int)s.PredictMs, v => v + " ms", v => { s.PredictMs = v; });
             AddSlider(t, "Stabilization", 0, 3, s.Stabilization, v => new[] { "Off", "Light", "Medium", "Strong" }[v], v => { s.Stabilization = v; });
             AddNote(t, "Ignores small head wobble (chewing, breathing, walking). Stronger = steadier, but screens trail slightly behind fast turns.");

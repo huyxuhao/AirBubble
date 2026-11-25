@@ -98,6 +98,13 @@ namespace XrealDesktop.PcViewer
 
         // frame timing (render thread): for judder diagnostics
         int m_LateFrames; double m_WorstFrameMs, m_UploadMs, m_UploadCount, m_LastSwapMs, m_DrawMs, m_SwapMs;
+        double m_FramePeriodMs = 1000.0 / 60;
+        static bool s_GlRetried;
+        // ponytail: fixed safety margin between measuring the head and the display refresh (draw + GPU must fit in it).
+        // Raise it if the log shows late frames; lower it for less latency.
+        const double LatchMarginMs = 5;
+        [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);   // 1 ms sleeps for the late head pose
+        [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint ms);
         readonly int[] m_Cadence = new int[5];     // how many refreshes each video frame of the main screen stayed up
         int m_SinceNewFrame;
         static readonly bool s_NoPacing = Environment.GetEnvironmentVariable("XR_NO_PACING") != null;
@@ -317,8 +324,8 @@ namespace XrealDesktop.PcViewer
                     case Hk.Recenter: m_RecenterRequested = true; Toast("Recentered"); break;
                     case Hk.Closer: PushPull(1 / 1.12); break;
                     case Hk.Farther: PushPull(1.12); break;
-                    case Hk.FovDown: m_Settings.FovV = Math.Max(10, m_Settings.FovV - 0.5f); m_Settings.Save(); Toast(string.Format("Field of view {0:F1} deg", m_Settings.FovV)); break;
-                    case Hk.FovUp: m_Settings.FovV = Math.Min(60, m_Settings.FovV + 0.5f); m_Settings.Save(); Toast(string.Format("Field of view {0:F1} deg", m_Settings.FovV)); break;
+                    case Hk.FovDown: m_Settings.FovV = Math.Max(10, m_Settings.FovV - 0.5f); m_Settings.Save(); Toast(FovToast()); break;
+                    case Hk.FovUp: m_Settings.FovV = Math.Min(60, m_Settings.FovV + 0.5f); m_Settings.Save(); Toast(FovToast()); break;
                     case Hk.Recal: m_Imu.Recalibrate(); Toast("Hold still: calibrating"); break;
                     case Hk.Settings: ShowSettings(); break;
                     case Hk.Arrange: m_ArrangeRequested = true; break;
@@ -579,12 +586,17 @@ namespace XrealDesktop.PcViewer
                 if (m_DriftW >= 5) m_DriftPending += Clamp(m_DriftAcc / m_DriftW / 12.0, -0.5, 0.5);
                 m_DriftAcc = m_DriftW = m_DriftT = 0;
             }
-            double step = Clamp(m_DriftPending, -0.01, 0.01);    // <= 0.6 deg/s: imperceptible
+            double step = Clamp(m_DriftPending, -0.6 * dt, 0.6 * dt);    // <= 0.6 deg/s: imperceptible
             if (step != 0)
             {
                 m_Anchor = (m_Anchor * Quat.AxisAngle(0, 1, 0, step * Deg)).Normalized();
                 m_DriftPending -= step; m_DriftTotal += step;
             }
+        }
+
+        string FovToast()
+        {
+            return m_Imu.FocalY > 0 ? "Field of view is set by the glasses' own calibration" : string.Format("Field of view {0:F1} deg", m_Settings.FovV);
         }
 
         /// <summary>Lays out all visible screens in front of you on an arc (up to 3 per row).</summary>
@@ -983,6 +995,7 @@ namespace XrealDesktop.PcViewer
         void RenderLoop()
         {
             IntPtr hdc = IntPtr.Zero, ctx = IntPtr.Zero;
+            timeBeginPeriod(1);
             try
             {
                 hdc = Native.GetDC(Handle);
@@ -991,6 +1004,17 @@ namespace XrealDesktop.PcViewer
                 Gl.LoadExtensions();
                 Log.W("Mipmaps: " + (Gl.HasGenerateMipmap ? "rebuilt explicitly (glGenerateMipmap)" : "off (driver has no glGenerateMipmap)"));
                 Log.W(string.Format("OpenGL: {0} / {1} / {2}, vsync={3}", Gl.GetString(Gl.VENDOR), Gl.GetString(Gl.RENDERER), Gl.GetString(Gl.VERSION), vsync));
+                // A context created while Windows is still rearranging the displays (it does that right after the glasses
+                // change mode) lands on Microsoft's software renderer: slow and without vsync. A window keeps its pixel
+                // format for life, so wait for the desktop to settle and start the viewer window over - once.
+                if (!s_GlRetried && (Gl.GetString(Gl.RENDERER) ?? "").Contains("GDI Generic"))
+                {
+                    s_GlRetried = true;
+                    for (int i = 0; i < 100 && m_Busy; i++) Thread.Sleep(100);
+                    Log.W("Software OpenGL: starting the viewer window over");
+                    BeginInvoke((Action)(() => { RestartRequested = true; Close(); }));
+                    return;
+                }
                 IntPtr font = Gl.CreateFont(-30, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 5, 0, "Segoe UI");
                 Native.SelectObject(hdc, font);
                 uint fontBase = Gl.GenLists(96);
@@ -1006,6 +1030,9 @@ namespace XrealDesktop.PcViewer
                 {
                     double nowT = m_Clock.Elapsed.TotalSeconds, dt = Math.Min(0.1, nowT - lastT); lastT = nowT;
                     m_VFov = m_Settings.FovV; m_HFov = 2 * Math.Atan(Math.Tan(m_VFov / 2 * Deg) * EW / H) / Deg;
+                    // the glasses' own calibration (per 1920x1080 eye) beats the setting: it is exact, and wider than it is
+                    // tall by 1.5 % more than 16:9, which no single Field of view value can express
+                    if (m_Imu.FocalY > 0) { m_VFov = 2 * Math.Atan(540 / m_Imu.FocalY) / Deg; m_HFov = 2 * Math.Atan(960 / m_Imu.FocalX) / Deg; }
 
                     // free GL resources of removed screens
                     lock (m_Lock)
@@ -1043,9 +1070,20 @@ namespace XrealDesktop.PcViewer
                     m_UploadMs += m_FrameClock.Elapsed.TotalMilliseconds - upStart; m_UploadCount++;
                     UpdateDock(screens);
 
-                    // head pose: sampled AFTER the uploads, right before drawing, so the time from 'measure head' to
-                    // 'show image' stays constant even while video frames are being uploaded (otherwise: judder)
-                    Quat head = Program.FixedHead ? Quat.AxisAngle(1, 0, 0, Program.FixedPitch * Deg) : m_Imu.GetPose(m_Settings.PredictMs / 1000.0);   // --fixed-head: tests without wearing the glasses
+                    // head pose: taken as late as possible. SwapBuffers returns at a display refresh and what is drawn now
+                    // goes out at the next one, so the time until then is pure waiting: sleep through it, measure the head
+                    // just before the deadline and predict only what is left. "Prediction" keeps its meaning (frame start
+                    // -> picture seen), but the guessed part shrinks by ~10 ms (--wiggle-test: about half the error while
+                    // turning) and no longer changes with the time the texture uploads took (judder).
+                    double sinceSwap = 0;
+                    if (vsync)
+                    {
+                        double t0 = m_FrameClock.Elapsed.TotalMilliseconds;
+                        double refresh = m_LastSwapMs + Math.Floor((t0 - m_LastSwapMs) / m_FramePeriodMs) * m_FramePeriodMs;   // the last refresh, also when this frame is already late
+                        sinceSwap = t0 - refresh;
+                        while (sinceSwap < m_FramePeriodMs - LatchMarginMs - 2) { Thread.Sleep(1); sinceSwap = m_FrameClock.Elapsed.TotalMilliseconds - refresh; }
+                    }
+                    Quat head = Program.FixedHead ? Quat.AxisAngle(1, 0, 0, Program.FixedPitch * Deg) : m_Imu.GetPose(Math.Max(0, m_Settings.PredictMs - sinceSwap) / 1000.0);   // --fixed-head: tests without wearing the glasses
                     if (m_RecenterRequested)
                     {
                         m_RecenterRequested = false; m_Anchor = Quat.AxisAngle(0, 1, 0, head.Yaw()); m_DriftPending = 0;
@@ -1081,7 +1119,7 @@ namespace XrealDesktop.PcViewer
                     {
                         Gl.Viewport(e * EW, 0, EW, H);
                         Gl.MatrixMode(Gl.PROJECTION); Gl.LoadIdentity();
-                        double near = 0.05, top = near * Math.Tan(m_VFov / 2 * Deg), right = top * EW / H;
+                        double near = 0.05, top = near * Math.Tan(m_VFov / 2 * Deg), right = near * Math.Tan(m_HFov / 2 * Deg);
                         // 3D: each eye's camera sits half the eye distance to the side (e 0 = left eye). An
                         // off-axis frustum makes both images line up exactly at 1/StereoConverge metres, and the
                         // vertical offset (split between the eyes) lines them up vertically.
@@ -1110,7 +1148,8 @@ namespace XrealDesktop.PcViewer
                     m_SwapMs += m_FrameClock.Elapsed.TotalMilliseconds - swapStart;
                     if (!vsync) Thread.Sleep(10);
                     double frameMs = m_FrameClock.Elapsed.TotalMilliseconds - m_LastSwapMs; m_LastSwapMs = m_FrameClock.Elapsed.TotalMilliseconds;
-                    if (frameMs > 25) m_LateFrames++;
+                    if (frameMs > 1.5 * m_FramePeriodMs) m_LateFrames++;
+                    else if (frameMs > 5) m_FramePeriodMs += (frameMs - m_FramePeriodMs) * 0.05;   // follows the display's real refresh period
                     if (frameMs > m_WorstFrameMs) m_WorstFrameMs = frameMs;
 
                     frames++;
@@ -1121,6 +1160,7 @@ namespace XrealDesktop.PcViewer
             catch (Exception ex) { Log.W("Render thread failed: " + ex); }
             finally
             {
+                timeEndPeriod(1);
                 if (ctx != IntPtr.Zero) { Gl.wglMakeCurrent(IntPtr.Zero, IntPtr.Zero); Gl.wglDeleteContext(ctx); }
                 if (hdc != IntPtr.Zero) Native.ReleaseDC(Handle, hdc);
             }
