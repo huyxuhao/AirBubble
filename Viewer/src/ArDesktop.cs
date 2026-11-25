@@ -224,7 +224,7 @@ namespace XrealDesktop.PcViewer
                     // default mode. Keep exactly the screens that were open last time (or one), at 1920x1080.
                     var keep = outs.FindAll(o => reopen.Contains(o.DeviceName));
                     if (keep.Count == 0) keep.Add(outs[0]);
-                    // One atomic arrangement: [PC screen(s)] [main AR screen = primary at 0,0] [glasses] [other AR screens]
+                    // One atomic arrangement: [glasses] [main AR screen = primary at 0,0] [PC screen(s)] [other AR screens]
                     // remembered screens that Windows didn't switch on: switch them on first
                     bool turnedOn = false;
                     foreach (var k in keep) if (!k.Attached) { VirtualScreens.Attach(k.DeviceName, VirtualScreens.DefaultWidth, VirtualScreens.DefaultHeight, false); turnedOn = true; }
@@ -245,17 +245,29 @@ namespace XrealDesktop.PcViewer
                     var want = new List<DisplayConfig.Want>();
                     int vw = VirtualScreens.DefaultWidth, vh = VirtualScreens.DefaultHeight, x = 0;
                     if (keepDevs.Count > 0) { want.Add(new DisplayConfig.Want { Device = keepDevs[0], Width = vw, Height = vh, X = 0, Y = 0 }); x = vw; }
-                    var gl = cur.Find(m => m.IsGlasses);
-                    if (gl != null) { want.Add(new DisplayConfig.Want { Device = gl.DeviceName, X = x, Y = 0 }); x += gl.Bounds.Width; }
+                    // Local change: this laptop sits to the RIGHT of where the AR main screen floats, so the PC screen(s)
+                    // go right of the main screen and the glasses go left (upstream: PC left, glasses right).
+                    foreach (var m in cur) if (!m.IsGlasses && !IsVirtual(m)) { want.Add(new DisplayConfig.Want { Device = m.DeviceName, X = x, Y = 0 }); x += m.Bounds.Width; }
                     for (int k = 1; k < keepDevs.Count; k++) { want.Add(new DisplayConfig.Want { Device = keepDevs[k], Width = vw, Height = vh, X = x, Y = 0 }); x += vw; }
-                    int lx = 0;
-                    foreach (var m in cur) if (!m.IsGlasses && !IsVirtual(m)) { lx -= m.Bounds.Width; want.Add(new DisplayConfig.Want { Device = m.DeviceName, X = lx, Y = 0 }); }
+                    var gl = cur.Find(m => m.IsGlasses);
+                    if (gl != null) want.Add(new DisplayConfig.Want { Device = gl.DeviceName, X = -gl.Bounds.Width, Y = 0 });
                     // no virtual screen came on: leave Windows as it is (PC screen primary); never make the glasses primary
                     int rc = keepDevs.Count > 0 ? DisplayConfig.Apply(want, DisplayConfig.SaveArLayout) : -1;
                     Log.W(keepDevs.Count > 0 ? "Desktop arranged for AR (" + want.Count + " displays, main " + keepDevs[0] + "): " + (rc == 0 ? "ok" : "error " + rc) : "Desktop left as it is: no virtual screen to show");
                     Thread.Sleep(1200);
                     if (keepDevs.Count > 0) { m_MainDevice = keepDevs[0]; DisplayConfig.EnsurePrimary(m_MainDevice, Log.W); }
                     foreach (var m in DisplaySetup.ActiveMonitors()) Log.W(string.Format("  {0} {1}x{2} at {3},{4}{5}{6}", m.DeviceName, m.Bounds.Width, m.Bounds.Height, m.Bounds.Left, m.Bounds.Top, m.Primary ? " primary" : "", m.IsGlasses ? " glasses" : ""));
+                    // Local change: Windows doesn't always put the displays where asked on the first go (seen with the PC
+                    // screen right of the main screen): compare with what was asked and ask once more.
+                    var nowMons = DisplaySetup.ActiveMonitors();
+                    if (keepDevs.Count > 0 && want.Exists(w => { var a = nowMons.Find(m => m.DeviceName == w.Device); return a != null && (a.Bounds.Left != w.X || a.Bounds.Top != w.Y); }))
+                    {
+                        Log.W("AR layout wanted: " + string.Join(", ", want.ConvertAll(w => w.Device + " at " + w.X + "," + w.Y)));
+                        rc = DisplayConfig.Apply(want, DisplayConfig.SaveArLayout);
+                        Log.W("AR layout differed: applied again -> " + (rc == 0 ? "ok" : "error " + rc));
+                        Thread.Sleep(1200);
+                        foreach (var m in DisplaySetup.ActiveMonitors()) Log.W(string.Format("  {0} {1}x{2} at {3},{4}{5}{6}", m.DeviceName, m.Bounds.Width, m.Bounds.Height, m.Bounds.Left, m.Bounds.Top, m.Primary ? " primary" : "", m.IsGlasses ? " glasses" : ""));
+                    }
                     BeginInvoke((Action)(() =>
                     {
                         FollowGlassesDisplay();
