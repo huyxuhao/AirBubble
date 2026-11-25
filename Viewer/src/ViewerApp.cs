@@ -335,6 +335,8 @@ namespace XrealDesktop.PcViewer
                     try { DisplayConfig.RestorePcDesktop(null, Log.W); } catch (Exception ex) { Log.W("Desktop restore failed: " + ex.Message); }
                 Application.EnableVisualStyles();
                 var settings = Settings.Load();
+                Log.W(string.Format(CultureInfo.InvariantCulture, "Settings: stabilization {0}, predict {1} ms, pc screens {2}, auto drift {3}, bubble {4}, bubble ai {5}",
+                    settings.Stabilization, settings.PredictMs, settings.ShowPcScreens, settings.AutoDrift, settings.ShowBubble, settings.BubbleAi));
                 if (Array.IndexOf(args, "--3d") >= 0) settings.Sbs3D = true;        // test overrides (not saved)
                 if (Array.IndexOf(args, "--2d") >= 0) settings.Sbs3D = false;
                 if (Array.IndexOf(args, "--curved") >= 0) settings.Curved = true;

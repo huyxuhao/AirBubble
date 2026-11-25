@@ -23,8 +23,8 @@ namespace XrealDesktop.PcViewer
         public volatile bool ShowPcScreens = false; // also float the PC's own monitor(s) in AR
         public volatile bool AutoDrift = true;      // slowly keep the main screen centred under your gaze
         public volatile int Stabilization = 2;     // head jitter buffer: 0 off, 1 light, 2 medium, 3 strong (walking)
-        public volatile bool ShowBubble = true;    // Bubble floats around in AR (click to pop)
-        public volatile bool BubbleAi = true;      // Bubble listens for his name and talks (Claude + ElevenLabs)
+        public volatile bool ShowBubble = false;   // Bubble floats around in AR (click to pop). Local change: off unless turned on in Settings
+        public volatile bool BubbleAi = false;     // Bubble listens for his name and talks (Claude + ElevenLabs). Local change: off unless turned on in Settings
         public volatile bool BubbleAppControl = false; // Bubble may click/type/press keys (how often he asks: BubbleAutonomy)
         public volatile int BubbleAutonomy = 0;    // 0 ask every time, 1 semi-autonomous (asks for large/dangerous), 2 fully autonomous (see Autonomy)
         public volatile bool BubbleSpatialAudio = true; // bubbles' voices and pops come from where they float (stereo)
@@ -109,7 +109,7 @@ namespace XrealDesktop.PcViewer
                     }
                 }
             }
-            catch { }
+            catch (Exception e) { Log.W("Settings: defaults used, could not read " + PathFor() + ": " + e.Message); }
             return s;
         }
 
